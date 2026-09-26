@@ -77,6 +77,17 @@ const DEFAULT_PREFS: WorkPreferences = {
   strictRestMode: true,
 };
 
+const DEFAULT_STATS: UserStats = {
+  totalWorkMinutes: 0,
+  sessionsCompleted: 0,
+  sessionsDeferred: 0,
+  projectsCompleted: 0,
+  tasksCompleted: 0,
+  averageSessionAccuracy: 1,
+  weeklyWorkMinutes: [0, 0, 0, 0, 0, 0, 0],
+  estimationFactor: 1,
+};
+
 // ══════════════════════════════════════════════════════════════════════
 // Store interface
 // ══════════════════════════════════════════════════════════════════════
@@ -212,13 +223,18 @@ export const useAppStore = create<NexaStore>()(
       workPreferences: DEFAULT_PREFS,
 
       setUser: (u) => {
-        // Nettoyer les projets et sessions de démo résiduels
-        const cleanedProjects = get().projects.filter(
+        const prevUser = get().user;
+        const isDifferentUser = !prevUser || prevUser.id !== u.id;
+
+        // Si c'est un compte différent ou premier chargement : réinitialiser pour isoler les données
+        const targetProjects = isDifferentUser ? [] : get().projects.filter(
           p => !p.id.includes("demo") && !p.id.toLowerCase().includes("leadorapro")
         );
-        const cleanedSessions = get().sessions.filter(
+        const targetSessions = isDifferentUser ? [] : get().sessions.filter(
           s => !s.id.includes("demo") && !s.projectId?.toLowerCase().includes("leadorapro")
         );
+        const targetBlocked = isDifferentUser ? [] : get().blockedPeriods;
+        const targetPrefs = isDifferentUser ? DEFAULT_PREFS : get().workPreferences;
 
         const currentV = get().ui.currentView;
         const targetView = u.onboardingComplete
@@ -227,20 +243,25 @@ export const useAppStore = create<NexaStore>()(
 
         set({
           user: u,
-          projects: cleanedProjects,
-          sessions: cleanedSessions,
+          projects: targetProjects,
+          sessions: targetSessions,
+          blockedPeriods: targetBlocked,
+          workPreferences: targetPrefs,
           ui: {
             ...get().ui,
             currentView: targetView,
+            selectedProjectId: null,
+            selectedTaskId: null,
+            activeSessionId: null,
           },
         });
 
-        // Synchroniser immédiatement le profil et charger les données cloud
+        // Synchroniser le profil vers le cloud et charger immédiatement ses propres données
         if (u.id && u.id !== "guest-user") {
           syncUserProfile(u);
-          setTimeout(() => {
+          if (isDifferentUser) {
             get().loadFromCloud(u.id);
-          }, 100);
+          }
         }
       },
 
@@ -265,9 +286,26 @@ export const useAppStore = create<NexaStore>()(
         try {
           signOutUser();
         } catch {}
+        try {
+          localStorage.removeItem("nexa-os-storage");
+        } catch {}
         set({
           user: null,
-          ui: { ...get().ui, currentView: "auth", selectedProjectId: null, activeSessionId: null },
+          projects: [],
+          sessions: [],
+          blockedPeriods: [],
+          workPreferences: DEFAULT_PREFS,
+          stats: DEFAULT_STATS,
+          notifications: [],
+          cloudSyncStatus: { syncing: false, lastSync: null, error: null },
+          ui: {
+            currentView: "auth",
+            selectedProjectId: null,
+            selectedTaskId: null,
+            activeSessionId: null,
+            sidebarCollapsed: false,
+            searchQuery: "",
+          },
         });
       },
 
@@ -339,22 +377,27 @@ export const useAppStore = create<NexaStore>()(
 
           const patch: any = {};
           if (remoteProfile && get().user) {
-            patch.user = { ...get().user!, ...remoteProfile };
+            patch.user = {
+              ...get().user!,
+              ...remoteProfile,
+              // Ne JAMAIS rétrograder onboardingComplete à false si le client local l'a déjà validé
+              onboardingComplete: get().user!.onboardingComplete || !!remoteProfile.onboardingComplete,
+            };
           }
           if (remotePrefs) {
             patch.workPreferences = remotePrefs;
           }
-          if (remoteProjects && remoteProjects.length > 0) {
+          if (Array.isArray(remoteProjects)) {
             patch.projects = remoteProjects.filter(
               p => !p.id.includes("demo") && !p.id.toLowerCase().includes("leadorapro")
             );
           }
-          if (remoteSessions && remoteSessions.length > 0) {
+          if (Array.isArray(remoteSessions)) {
             patch.sessions = remoteSessions.filter(
               s => !s.id.includes("demo") && !s.projectId?.toLowerCase().includes("leadorapro")
             );
           }
-          if (remoteBlocked && remoteBlocked.length > 0) {
+          if (Array.isArray(remoteBlocked)) {
             patch.blockedPeriods = remoteBlocked;
           }
           if (remoteStats) {
@@ -889,9 +932,9 @@ export const useAppStore = create<NexaStore>()(
       name: "nexa-os-storage",
       partialize: (state) => ({
         ui: {
-          currentView: state.user?.onboardingComplete
-            ? (state.ui.currentView === "onboarding" || state.ui.currentView === "auth" ? "dashboard" : state.ui.currentView)
-            : (state.user ? "onboarding" : "auth"),
+          currentView: state.user
+            ? (state.ui.currentView === "auth" ? "dashboard" : state.ui.currentView)
+            : "auth",
           selectedProjectId: state.ui.selectedProjectId,
           selectedTaskId: state.ui.selectedTaskId,
           activeSessionId: state.ui.activeSessionId,
@@ -912,15 +955,20 @@ export const useAppStore = create<NexaStore>()(
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
-          // Si l'utilisateur est connecté et que l'onboarding est validé,
-          // ne jamais le renvoyer sur onboarding ou auth au rechargement F5
-          if (state.user?.onboardingComplete) {
-            if (state.ui.currentView === "onboarding" || state.ui.currentView === "auth") {
+          // Si un utilisateur est connecté
+          if (state.user) {
+            // Ne jamais le bloquer sur la page d'authentification
+            if (state.ui.currentView === "auth") {
               state.ui.currentView = "dashboard";
             }
-          } else if (state.user && !state.user.onboardingComplete) {
-            state.ui.currentView = "onboarding";
-          } else if (!state.user) {
+            // S'il a déjà validé l'onboarding ou qu'il a déjà des projets, ne JAMAIS le forcer sur onboarding
+            if (state.user.onboardingComplete || (state.projects && state.projects.length > 0)) {
+              if (state.ui.currentView === "onboarding") {
+                state.ui.currentView = "dashboard";
+              }
+              state.user.onboardingComplete = true;
+            }
+          } else {
             state.ui.currentView = "auth";
           }
           // Appliquer le thème

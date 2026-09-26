@@ -42,13 +42,15 @@ export default function AppShell() {
       const currentUser = state.user;
 
       if (session?.user) {
-        if (!currentUser) {
-          const u = session.user;
-          const name =
-            u.user_metadata?.full_name ||
-            u.user_metadata?.name ||
-            u.email?.split("@")[0] ||
-            "Utilisateur";
+        const u = session.user;
+        const name =
+          u.user_metadata?.full_name ||
+          u.user_metadata?.name ||
+          u.email?.split("@")[0] ||
+          "Utilisateur";
+
+        if (!currentUser || currentUser.id !== u.id) {
+          // Si pas d'utilisateur en cache ou utilisateur différent : réinitialiser et charger ses données
           setUser({
             id: u.id,
             name,
@@ -61,18 +63,20 @@ export default function AppShell() {
             onboardingComplete: true,
           });
         } else {
-          // L'utilisateur existe déjà en local : charger les données distantes Supabase
+          // Même utilisateur : charger les données distantes Supabase
           state.loadFromCloud(session.user.id);
-          // Si l'onboarding est déjà validé, ne jamais rester sur l'onboarding
-          if (currentUser.onboardingComplete && (currentView === "onboarding" || currentView === "auth")) {
+          const curV = useAppStore.getState().ui.currentView;
+          if ((currentUser.onboardingComplete || (state.projects && state.projects.length > 0)) && (curV === "onboarding" || curV === "auth")) {
             setView("dashboard");
           }
         }
-      } else if (!session && !currentUser) {
-        // Pas de session et pas d'utilisateur local → page d'auth
-        setView("auth");
-      } else if (currentUser?.onboardingComplete && (currentView === "onboarding" || currentView === "auth")) {
-        setView("dashboard");
+      } else if (!session) {
+        // Aucune session Supabase active : déconnecter pour sécuriser l'espace
+        if (currentUser) {
+          useAppStore.getState().logout();
+        } else {
+          setView("auth");
+        }
       }
       setAuthChecking(false);
     });
@@ -80,16 +84,16 @@ export default function AppShell() {
     // Écouter les changements d'état d'authentification
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
+        const currentStoreUser = useAppStore.getState().user;
         if (session?.user) {
           const u = session.user;
-          const name =
-            u.user_metadata?.full_name ||
-            u.user_metadata?.name ||
-            u.email?.split("@")[0] ||
-            "Utilisateur";
-          // Seulement mettre à jour si pas encore d'utilisateur
-          if (!useAppStore.getState().user) {
-            setUser({
+          if (!currentStoreUser || currentStoreUser.id !== u.id) {
+            const name =
+              u.user_metadata?.full_name ||
+              u.user_metadata?.name ||
+              u.email?.split("@")[0] ||
+              "Utilisateur";
+            useAppStore.getState().setUser({
               id: u.id,
               name,
               email: u.email || "",
@@ -100,6 +104,11 @@ export default function AppShell() {
               createdAt: u.created_at || new Date().toISOString(),
               onboardingComplete: true,
             });
+          }
+        } else if (!session) {
+          // Déconnexion détectée
+          if (currentStoreUser) {
+            useAppStore.getState().logout();
           }
         }
       }
@@ -141,8 +150,8 @@ export default function AppShell() {
 
   // ── Onboarding — pas de shell ─────────────────────────────────────────
   if (currentView === "onboarding") {
-    // Si l'utilisateur est déjà inscrit avec onboarding validé, ne JAMAIS lui réafficher l'onboarding !
-    if (user?.onboardingComplete) {
+    // Si l'utilisateur est déjà inscrit avec onboarding validé ou a déjà des projets, ne JAMAIS lui réafficher l'onboarding !
+    if (user?.onboardingComplete || (useAppStore.getState().projects && useAppStore.getState().projects.length > 0)) {
       setView("dashboard");
       return null;
     }

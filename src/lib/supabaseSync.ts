@@ -20,7 +20,27 @@ export interface SyncStatus {
 
 export async function syncUserProfile(user: User): Promise<boolean> {
   try {
-    const { error } = await supabase.from("profiles").upsert({
+    // 1. Tenter d'abord un update direct
+    const { error: updateError } = await supabase
+      .from("profiles")
+      .update({
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        avatar_url: user.avatarUrl ?? null,
+        theme: user.theme ?? "light",
+        timezone: user.timezone ?? "Europe/Paris",
+        onboarding_complete: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", user.id);
+
+    if (!updateError) {
+      return true;
+    }
+
+    // 2. Sinon tenter un upsert
+    const { error: upsertError } = await supabase.from("profiles").upsert({
       id: user.id,
       name: user.name,
       email: user.email,
@@ -28,11 +48,11 @@ export async function syncUserProfile(user: User): Promise<boolean> {
       avatar_url: user.avatarUrl ?? null,
       theme: user.theme ?? "light",
       timezone: user.timezone ?? "Europe/Paris",
-      onboarding_complete: user.onboardingComplete ?? true,
+      onboarding_complete: true,
       updated_at: new Date().toISOString(),
     });
-    if (error) {
-      console.warn("syncUserProfile notice:", error.message);
+    if (upsertError) {
+      console.warn("syncUserProfile notice:", upsertError.message);
       return false;
     }
     return true;
@@ -59,7 +79,7 @@ export async function fetchUserProfile(userId: string): Promise<Partial<User> | 
       avatarUrl: data.avatar_url,
       theme: data.theme,
       timezone: data.timezone,
-      onboardingComplete: data.onboarding_complete,
+      onboardingComplete: data.onboarding_complete ?? true,
     };
   } catch {
     return null;

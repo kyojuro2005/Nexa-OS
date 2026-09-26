@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { useAppStore } from "../stores/useAppStore";
 import { v4 as uuidv4 } from "uuid";
-import type { WorkPreferences, DayAvailability, DayOfWeek, AIProviderId } from "../types";
+import type { WorkPreferences, DayAvailability, DayOfWeek, AIProviderId, User } from "../types";
+import { syncUserProfile, syncWorkPreferences } from "../lib/supabaseSync";
 
 const AI_PROVIDERS: { id: AIProviderId; name: string; placeholder: string; icon: string }[] = [
   { id: "openai",   name: "OpenAI GPT",    placeholder: "sk-...",                          icon: "auto_awesome" },
@@ -9,7 +10,6 @@ const AI_PROVIDERS: { id: AIProviderId; name: string; placeholder: string; icon:
   { id: "gemini",   name: "Gemini",        placeholder: "AIzaSy...",                       icon: "globe" },
   { id: "deepseek", name: "DeepSeek",      placeholder: "sk-...",                          icon: "wind_power" },
 ];
-
 
 const STEPS = ["Bienvenue", "Profil", "Disponibilités", "Préférences", "Prêt"];
 
@@ -41,10 +41,10 @@ function AvatarInitials({ name, size = 64 }: { name: string; size?: number }) {
 }
 
 export default function OnboardingPage() {
-  const { setUser, setWorkPreferences, setAIProvider, setView, user } = useAppStore();
+  const { setUser, setWorkPreferences, setAIProvider, setView, user, workPreferences } = useAppStore();
   const [step, setStep] = useState(0);
 
-  // Profil — pré-rempli depuis Supabase si dispo
+  // Profil — pré-rempli depuis Supabase ou store si dispo
   const [name, setName] = useState(user?.name ?? "");
   const [role, setRole] = useState(user?.role ?? "");
   const [selectedProvider, setSelectedProvider] = useState<AIProviderId>("openai");
@@ -54,25 +54,27 @@ export default function OnboardingPage() {
 
   // Disponibilités
   const [availability, setAvailability] = useState<DayAvailability[]>(
-    DEFAULT_DAYS.map(({ day }) => ({
-      day,
-      enabled: ["lun", "mar", "mer", "jeu", "ven"].includes(day),
-      slots: ["lun", "mar", "mer", "jeu", "ven"].includes(day)
-        ? [
-            { start: "09:00", end: "12:00", type: "available" as const },
-            { start: "12:00", end: "14:00", type: "break" as const, label: "Déjeuner" },
-            { start: "14:00", end: "18:00", type: "available" as const },
-          ]
-        : [],
-    }))
+    workPreferences?.availability && workPreferences.availability.length > 0
+      ? workPreferences.availability
+      : DEFAULT_DAYS.map(({ day }) => ({
+          day,
+          enabled: ["lun", "mar", "mer", "jeu", "ven"].includes(day),
+          slots: ["lun", "mar", "mer", "jeu", "ven"].includes(day)
+            ? [
+                { start: "09:00", end: "12:00", type: "available" as const },
+                { start: "12:00", end: "14:00", type: "break" as const, label: "Déjeuner" },
+                { start: "14:00", end: "18:00", type: "available" as const },
+              ]
+            : [],
+        }))
   );
 
   // Préférences
-  const [preferredSession, setPreferredSession] = useState(90);
-  const [maxDaily, setMaxDaily] = useState(6);
-  const [strictRest, setStrictRest] = useState(true);
-  const [peakStart, setPeakStart] = useState("09:00");
-  const [peakEnd, setPeakEnd] = useState("12:00");
+  const [preferredSession, setPreferredSession] = useState(workPreferences?.preferredSessionDuration ?? 90);
+  const [maxDaily, setMaxDaily] = useState(workPreferences?.maxDailyWorkHours ?? 6);
+  const [strictRest, setStrictRest] = useState(workPreferences?.strictRestMode ?? true);
+  const [peakStart, setPeakStart] = useState(workPreferences?.peakHoursStart ?? "09:00");
+  const [peakEnd, setPeakEnd] = useState(workPreferences?.peakHoursEnd ?? "12:00");
 
   const enabledDays = availability.filter(d => d.enabled);
   const weeklyHours = enabledDays.reduce((total, day) => {
@@ -114,9 +116,25 @@ export default function OnboardingPage() {
     setStep(nextStep);
   };
 
-  const handleFinish = () => {
-    if (!name.trim()) return;
+  const handleSkip = () => {
+    const fallbackName = user?.name || (user?.email ? user.email.split("@")[0] : "Utilisateur");
+    const updatedUser: User = {
+      id: user?.id || uuidv4(),
+      name: name.trim() || fallbackName,
+      email: user?.email || "",
+      role: role.trim() || user?.role || "Solo Builder",
+      avatarUrl: user?.avatarUrl,
+      theme: (user?.theme || "light") as "light" | "dark",
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      createdAt: user?.createdAt || new Date().toISOString(),
+      onboardingComplete: true,
+    };
+    setUser(updatedUser);
+    syncUserProfile(updatedUser);
+    setView("dashboard");
+  };
 
+  const handleFinish = () => {
     const prefs: WorkPreferences = {
       availability,
       preferredSessionDuration: preferredSession,
@@ -134,26 +152,50 @@ export default function OnboardingPage() {
     if (apiKey.trim()) setAIProvider(selectedProvider, apiKey.trim());
 
     // Créer/mettre à jour l'utilisateur
-    setUser({
+    const fallbackName = user?.name || (user?.email ? user.email.split("@")[0] : "Utilisateur");
+    const updatedUser: User = {
       id: user?.id || uuidv4(),
-      name: name.trim(),
+      name: name.trim() || fallbackName,
       email: user?.email || "",
-      role: role.trim() || "Développeur indépendant",
+      role: role.trim() || user?.role || "Solo Builder",
       avatarUrl: user?.avatarUrl,
-      theme: "light",
+      theme: (user?.theme || "light") as "light" | "dark",
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       createdAt: user?.createdAt || new Date().toISOString(),
       onboardingComplete: true,
-    });
+    };
+
+    setUser(updatedUser);
+    syncUserProfile(updatedUser);
+    if (updatedUser.id && updatedUser.id !== "guest-user") {
+      syncWorkPreferences(updatedUser.id, prefs);
+    }
     setView("dashboard");
   };
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-2xl">
-        {/* Logo */}
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-surface-container-low flex items-center justify-center shadow-md mb-3 border border-outline-variant/30 p-2">
+        {/* Barre supérieure avec bouton passer */}
+        <div className="flex justify-between items-center mb-6">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-surface-container-low flex items-center justify-center border border-outline-variant/30 p-1">
+              <img src="/nexawbg.png" alt="Nexa OS" className="w-full h-full object-contain" />
+            </div>
+            <span className="font-semibold text-on-surface tracking-tight text-body-md">Nexa OS</span>
+          </div>
+          <button
+            onClick={handleSkip}
+            className="text-body-sm text-outline hover:text-primary transition-colors flex items-center gap-1 font-mono hover:underline"
+          >
+            <span>Passer et aller au Dashboard</span>
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_forward</span>
+          </button>
+        </div>
+
+        {/* Logo principal */}
+        <div className="flex flex-col items-center mb-6">
+          <div className="w-14 h-14 rounded-2xl bg-surface-container-low flex items-center justify-center shadow-md mb-2 border border-outline-variant/30 p-2">
             <img
               src="/nexawbg.png"
               alt="Nexa OS Logo"
@@ -161,7 +203,7 @@ export default function OnboardingPage() {
             />
           </div>
           <span className="text-headline-lg font-semibold text-on-surface tracking-tight">Nexa OS</span>
-          <span className="text-body-sm text-outline mt-1 font-mono">Personal AI Work OS</span>
+          <span className="text-body-sm text-outline mt-0.5 font-mono">Personal AI Work OS</span>
         </div>
 
         {/* Indicateur de progression */}
@@ -217,10 +259,15 @@ export default function OnboardingPage() {
                 ))}
               </div>
 
-              <button onClick={() => setStep(1)} className="btn-primary mt-2 w-full justify-center">
-                Commencer la configuration
-                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>arrow_forward</span>
-              </button>
+              <div className="flex flex-col sm:flex-row gap-3 mt-3 w-full">
+                <button onClick={() => setStep(1)} className="btn-primary flex-1 justify-center py-3">
+                  Commencer la configuration
+                  <span className="material-symbols-outlined" style={{ fontSize: 18 }}>arrow_forward</span>
+                </button>
+                <button onClick={handleSkip} className="btn-secondary justify-center py-3 text-body-sm">
+                  Passer directement au Dashboard
+                </button>
+              </div>
             </div>
           )}
 
