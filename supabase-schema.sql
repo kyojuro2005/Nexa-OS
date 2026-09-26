@@ -1,9 +1,15 @@
 -- ══════════════════════════════════════════════════════════════════════
--- NEXA OS — Schéma PostgreSQL Supabase & Sécurité RLS
+-- NEXA OS — Schéma PostgreSQL Supabase & Sécurité RLS (100% IDEMPOTENT)
 -- À exécuter dans la console Supabase > SQL Editor
+-- Ce script peut être exécuté plusieurs fois sans aucune erreur.
 -- ══════════════════════════════════════════════════════════════════════
 
+-- Extensions utiles
+create extension if not exists "uuid-ossp";
+
+-- ──────────────────────────────────────────────────────────────────────
 -- 1. Table des profils utilisateurs
+-- ──────────────────────────────────────────────────────────────────────
 create table if not exists public.profiles (
   id uuid references auth.users on delete cascade primary key,
   name text,
@@ -17,33 +23,50 @@ create table if not exists public.profiles (
   updated_at timestamptz default timezone('utc'::text, now()) not null
 );
 
+-- Colonnes additionnelles si la table existait déjà
+alter table public.profiles add column if not exists onboarding_complete boolean default false;
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles add column if not exists role text default 'Solo Builder';
+alter table public.profiles add column if not exists theme text default 'light';
+alter table public.profiles add column if not exists timezone text default 'Europe/Paris';
+
 -- RLS pour profiles
 alter table public.profiles enable row level security;
 
+drop policy if exists "Les utilisateurs peuvent voir leur propre profil" on public.profiles;
 create policy "Les utilisateurs peuvent voir leur propre profil"
   on public.profiles for select
   using (auth.uid() = id);
 
+drop policy if exists "Les utilisateurs peuvent insérer leur propre profil" on public.profiles;
 create policy "Les utilisateurs peuvent insérer leur propre profil"
   on public.profiles for insert
   with check (auth.uid() = id);
 
+drop policy if exists "Les utilisateurs peuvent modifier leur propre profil" on public.profiles;
 create policy "Les utilisateurs peuvent modifier leur propre profil"
   on public.profiles for update
   using (auth.uid() = id);
 
+-- ──────────────────────────────────────────────────────────────────────
 -- 2. Trigger automatique à la création d'un utilisateur auth
+-- ──────────────────────────────────────────────────────────────────────
 create or replace function public.handle_new_user()
 returns trigger as $$
 begin
-  insert into public.profiles (id, email, name, avatar_url)
+  insert into public.profiles (id, email, name, avatar_url, onboarding_complete)
   values (
     new.id,
     new.email,
     coalesce(new.raw_user_meta_data->>'full_name', new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)),
-    new.raw_user_meta_data->>'avatar_url'
+    new.raw_user_meta_data->>'avatar_url',
+    false
   )
-  on conflict (id) do nothing;
+  on conflict (id) do update set
+    email = excluded.email,
+    name = coalesce(public.profiles.name, excluded.name),
+    avatar_url = coalesce(public.profiles.avatar_url, excluded.avatar_url),
+    updated_at = now();
   return new;
 end;
 $$ language plpgsql security definer;
@@ -54,7 +77,9 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
+-- ──────────────────────────────────────────────────────────────────────
 -- 3. Table des préférences de travail
+-- ──────────────────────────────────────────────────────────────────────
 create table if not exists public.work_preferences (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references auth.users on delete cascade not null unique,
@@ -73,12 +98,15 @@ create table if not exists public.work_preferences (
 
 alter table public.work_preferences enable row level security;
 
+drop policy if exists "Accès complet aux préférences de l'utilisateur" on public.work_preferences;
 create policy "Accès complet aux préférences de l'utilisateur"
   on public.work_preferences for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- ──────────────────────────────────────────────────────────────────────
 -- 4. Table des projets
+-- ──────────────────────────────────────────────────────────────────────
 create table if not exists public.projects (
   id text primary key,
   user_id uuid references auth.users on delete cascade not null,
@@ -101,12 +129,15 @@ create table if not exists public.projects (
 
 alter table public.projects enable row level security;
 
+drop policy if exists "Accès complet aux projets de l'utilisateur" on public.projects;
 create policy "Accès complet aux projets de l'utilisateur"
   on public.projects for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- ──────────────────────────────────────────────────────────────────────
 -- 5. Table des sessions de travail
+-- ──────────────────────────────────────────────────────────────────────
 create table if not exists public.work_sessions (
   id text primary key,
   user_id uuid references auth.users on delete cascade not null,
@@ -128,12 +159,15 @@ create table if not exists public.work_sessions (
 
 alter table public.work_sessions enable row level security;
 
+drop policy if exists "Accès complet aux sessions de l'utilisateur" on public.work_sessions;
 create policy "Accès complet aux sessions de l'utilisateur"
   on public.work_sessions for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- ──────────────────────────────────────────────────────────────────────
 -- 6. Table des périodes bloquées
+-- ──────────────────────────────────────────────────────────────────────
 create table if not exists public.blocked_periods (
   id text primary key,
   user_id uuid references auth.users on delete cascade not null,
@@ -147,12 +181,15 @@ create table if not exists public.blocked_periods (
 
 alter table public.blocked_periods enable row level security;
 
+drop policy if exists "Accès complet aux périodes bloquées de l'utilisateur" on public.blocked_periods;
 create policy "Accès complet aux périodes bloquées de l'utilisateur"
   on public.blocked_periods for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- ──────────────────────────────────────────────────────────────────────
 -- 7. Table des statistiques utilisateur
+-- ──────────────────────────────────────────────────────────────────────
 create table if not exists public.user_stats (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references auth.users on delete cascade not null unique,
@@ -169,21 +206,22 @@ create table if not exists public.user_stats (
 
 alter table public.user_stats enable row level security;
 
+drop policy if exists "Accès complet aux statistiques de l'utilisateur" on public.user_stats;
 create policy "Accès complet aux statistiques de l'utilisateur"
   on public.user_stats for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
--- ══════════════════════════════════════════════════════════════════════
+-- ──────────────────────────────────────────────────────────────────────
 -- 8. Storage — Bucket avatars
--- ══════════════════════════════════════════════════════════════════════
+-- ──────────────────────────────────────────────────────────────────────
 
 -- Créer le bucket (public = lecture publique des images)
 insert into storage.buckets (id, name, public)
   values ('avatars', 'avatars', true)
   on conflict (id) do nothing;
 
--- Politique : chaque utilisateur peut lire/écrire uniquement dans son dossier
+drop policy if exists "Upload avatar par l'utilisateur" on storage.objects;
 create policy "Upload avatar par l'utilisateur"
   on storage.objects for insert
   with check (
@@ -191,6 +229,7 @@ create policy "Upload avatar par l'utilisateur"
     and auth.uid()::text = (storage.foldername(name))[1]
   );
 
+drop policy if exists "Mise à jour avatar par l'utilisateur" on storage.objects;
 create policy "Mise à jour avatar par l'utilisateur"
   on storage.objects for update
   using (
@@ -198,6 +237,7 @@ create policy "Mise à jour avatar par l'utilisateur"
     and auth.uid()::text = (storage.foldername(name))[1]
   );
 
+drop policy if exists "Lecture publique des avatars" on storage.objects;
 create policy "Lecture publique des avatars"
   on storage.objects for select
   using (bucket_id = 'avatars');

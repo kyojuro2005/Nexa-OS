@@ -37,29 +37,42 @@ export default function AppShell() {
 
   // ── Restauration de session Supabase au chargement ──────────────────
   useEffect(() => {
-    // Vérifier la session existante (OAuth callback ou localStorage)
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user && !user) {
-        const u = session.user;
-        const name =
-          u.user_metadata?.full_name ||
-          u.user_metadata?.name ||
-          u.email?.split("@")[0] ||
-          "Utilisateur";
-        setUser({
-          id: u.id,
-          name,
-          email: u.email || "",
-          role: u.user_metadata?.role || "Solo Builder",
-          avatarUrl: u.user_metadata?.avatar_url,
-          theme: "light",
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          createdAt: u.created_at || new Date().toISOString(),
-          onboardingComplete: true,
-        });
-      } else if (!session && !user) {
+      const state = useAppStore.getState();
+      const currentUser = state.user;
+
+      if (session?.user) {
+        if (!currentUser) {
+          const u = session.user;
+          const name =
+            u.user_metadata?.full_name ||
+            u.user_metadata?.name ||
+            u.email?.split("@")[0] ||
+            "Utilisateur";
+          setUser({
+            id: u.id,
+            name,
+            email: u.email || "",
+            role: u.user_metadata?.role || "Solo Builder",
+            avatarUrl: u.user_metadata?.avatar_url,
+            theme: "light",
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            createdAt: u.created_at || new Date().toISOString(),
+            onboardingComplete: true,
+          });
+        } else {
+          // L'utilisateur existe déjà en local : charger les données distantes Supabase
+          state.loadFromCloud(session.user.id);
+          // Si l'onboarding est déjà validé, ne jamais rester sur l'onboarding
+          if (currentUser.onboardingComplete && (currentView === "onboarding" || currentView === "auth")) {
+            setView("dashboard");
+          }
+        }
+      } else if (!session && !currentUser) {
         // Pas de session et pas d'utilisateur local → page d'auth
         setView("auth");
+      } else if (currentUser?.onboardingComplete && (currentView === "onboarding" || currentView === "auth")) {
+        setView("dashboard");
       }
       setAuthChecking(false);
     });
@@ -128,6 +141,11 @@ export default function AppShell() {
 
   // ── Onboarding — pas de shell ─────────────────────────────────────────
   if (currentView === "onboarding") {
+    // Si l'utilisateur est déjà inscrit avec onboarding validé, ne JAMAIS lui réafficher l'onboarding !
+    if (user?.onboardingComplete) {
+      setView("dashboard");
+      return null;
+    }
     return <OnboardingPage />;
   }
 

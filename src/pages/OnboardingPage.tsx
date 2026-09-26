@@ -41,7 +41,7 @@ function AvatarInitials({ name, size = 64 }: { name: string; size?: number }) {
 }
 
 export default function OnboardingPage() {
-  const { setUser, setWorkPreferences, setAIProvider, user } = useAppStore();
+  const { setUser, setWorkPreferences, setAIProvider, setView, user } = useAppStore();
   const [step, setStep] = useState(0);
 
   // Profil — pré-rempli depuis Supabase si dispo
@@ -145,6 +145,7 @@ export default function OnboardingPage() {
       createdAt: user?.createdAt || new Date().toISOString(),
       onboardingComplete: true,
     });
+    setView("dashboard");
   };
 
   return (

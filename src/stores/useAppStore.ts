@@ -170,6 +170,18 @@ function computeProgress(phases: Phase[]): number {
 }
 
 
+// Synchronisation debouncée automatique vers Supabase
+let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
+const debouncedCloudSync = (get: () => NexaStore) => {
+  if (autoSyncTimer) clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => {
+    const s = get();
+    if (s.user && s.user.id && s.user.id !== "guest-user") {
+      s.syncToCloud();
+    }
+  }, 800);
+};
+
 // ══════════════════════════════════════════════════════════════════════
 // Store
 // ══════════════════════════════════════════════════════════════════════
@@ -178,7 +190,7 @@ export const useAppStore = create<NexaStore>()(
     (set, get) => ({
       // ── UI ──────────────────────────────────────────────────────────
       ui: {
-        currentView: "onboarding",
+        currentView: "dashboard",
         selectedProjectId: null,
         selectedTaskId: null,
         activeSessionId: null,
@@ -208,18 +220,24 @@ export const useAppStore = create<NexaStore>()(
           s => !s.id.includes("demo") && !s.projectId?.toLowerCase().includes("leadorapro")
         );
 
+        const currentV = get().ui.currentView;
+        const targetView = u.onboardingComplete
+          ? (currentV === "onboarding" || currentV === "auth" ? "dashboard" : currentV)
+          : "onboarding";
+
         set({
           user: u,
           projects: cleanedProjects,
           sessions: cleanedSessions,
           ui: {
             ...get().ui,
-            currentView: u.onboardingComplete ? "dashboard" : "onboarding",
+            currentView: targetView,
           },
         });
 
-        // Charger les données distantes Supabase si utilisateur connecté
+        // Synchroniser immédiatement le profil et charger les données cloud
         if (u.id && u.id !== "guest-user") {
+          syncUserProfile(u);
           setTimeout(() => {
             get().loadFromCloud(u.id);
           }, 100);
@@ -428,6 +446,7 @@ export const useAppStore = create<NexaStore>()(
               : p
           ),
         }));
+        debouncedCloudSync(get);
         return newPhase;
       },
 
@@ -459,6 +478,7 @@ export const useAppStore = create<NexaStore>()(
           }),
         }));
         setTimeout(() => get().recalculatePlanning(), 50);
+        debouncedCloudSync(get);
         return newTask;
       },
 
@@ -482,6 +502,7 @@ export const useAppStore = create<NexaStore>()(
             };
           }),
         }));
+        debouncedCloudSync(get);
       },
 
       completeTask: (projectId, taskId, actualMinutes) => {
@@ -530,6 +551,7 @@ export const useAppStore = create<NexaStore>()(
         }
         get().refreshStats();
         setTimeout(() => get().recalculatePlanning(), 50);
+        debouncedCloudSync(get);
       },
 
       addSubtask: (projectId, taskId, title) => {
@@ -606,13 +628,16 @@ export const useAppStore = create<NexaStore>()(
       addSession: (s) => {
         const session: WorkSession = { id: uuidv4(), ...s };
         set(state => ({ sessions: [...state.sessions, session] }));
+        debouncedCloudSync(get);
         return session;
       },
 
-      updateSession: (id, patch) =>
+      updateSession: (id, patch) => {
         set(s => ({
           sessions: s.sessions.map(s => s.id === id ? { ...s, ...patch } : s),
-        })),
+        }));
+        debouncedCloudSync(get);
+      },
 
       completeSession: (id, actualMinutes, notes) => {
         const session = get().sessions.find(s => s.id === id);
@@ -635,6 +660,7 @@ export const useAppStore = create<NexaStore>()(
           setTimeout(() => get().recalculatePlanning(), 100);
         }
         get().refreshStats();
+        debouncedCloudSync(get);
       },
 
       deferSession: (id, newDate, newStart) => {
@@ -654,10 +680,13 @@ export const useAppStore = create<NexaStore>()(
           ),
         }));
         get().refreshStats();
+        debouncedCloudSync(get);
       },
 
-      deleteSession: (id) =>
-        set(s => ({ sessions: s.sessions.filter(s => s.id !== id) })),
+      deleteSession: (id) => {
+        set(s => ({ sessions: s.sessions.filter(s => s.id !== id) }));
+        debouncedCloudSync(get);
+      },
 
       getTodaySessions: () => {
         const today = new Date().toISOString().slice(0, 10);
@@ -686,15 +715,19 @@ export const useAppStore = create<NexaStore>()(
       // ── Blocked periods ────────────────────────────────────────────────
       blockedPeriods: [],
 
-      addBlockedPeriod: (bp) =>
+      addBlockedPeriod: (bp) => {
         set(s => ({
           blockedPeriods: [...s.blockedPeriods, { id: uuidv4(), ...bp }],
-        })),
+        }));
+        debouncedCloudSync(get);
+      },
 
-      removeBlockedPeriod: (id) =>
+      removeBlockedPeriod: (id) => {
         set(s => ({
           blockedPeriods: s.blockedPeriods.filter(b => b.id !== id),
-        })),
+        }));
+        debouncedCloudSync(get);
+      },
 
       // ── Stats ──────────────────────────────────────────────────────────
       stats: {
@@ -855,6 +888,16 @@ export const useAppStore = create<NexaStore>()(
     {
       name: "nexa-os-storage",
       partialize: (state) => ({
+        ui: {
+          currentView: state.user?.onboardingComplete
+            ? (state.ui.currentView === "onboarding" || state.ui.currentView === "auth" ? "dashboard" : state.ui.currentView)
+            : (state.user ? "onboarding" : "auth"),
+          selectedProjectId: state.ui.selectedProjectId,
+          selectedTaskId: state.ui.selectedTaskId,
+          activeSessionId: state.ui.activeSessionId,
+          sidebarCollapsed: state.ui.sidebarCollapsed,
+          searchQuery: "",
+        },
         user: state.user,
         workPreferences: state.workPreferences,
         projects: state.projects,
@@ -867,6 +910,27 @@ export const useAppStore = create<NexaStore>()(
         notifications: state.notifications,
         theme: state.theme,
       }),
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          // Si l'utilisateur est connecté et que l'onboarding est validé,
+          // ne jamais le renvoyer sur onboarding ou auth au rechargement F5
+          if (state.user?.onboardingComplete) {
+            if (state.ui.currentView === "onboarding" || state.ui.currentView === "auth") {
+              state.ui.currentView = "dashboard";
+            }
+          } else if (state.user && !state.user.onboardingComplete) {
+            state.ui.currentView = "onboarding";
+          } else if (!state.user) {
+            state.ui.currentView = "auth";
+          }
+          // Appliquer le thème
+          if (state.theme === "dark") {
+            document.documentElement.classList.add("dark");
+          } else {
+            document.documentElement.classList.remove("dark");
+          }
+        }
+      },
     }
   )
 );
